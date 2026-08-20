@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+
+# MTP detection cache (per-user, regenerated on first run)
+run_qwen36_27b_mtp.ini
