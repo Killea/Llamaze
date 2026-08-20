@@ -62,17 +62,15 @@ from gguf_utils import (
     model_context_length,
 )
 
-try:
-    import responses_adapter
-    _RESPONSES_ADAPTER_AVAILABLE = True
-except ImportError:
-    _RESPONSES_ADAPTER_AVAILABLE = False
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL_DIR = SCRIPT_DIR.parent / "llama_model"
 DEFAULT_MTP_CACHE = SCRIPT_DIR / "llamaze_mtp.ini"
 LOG_DIR = SCRIPT_DIR / "gui_log"
 DEFAULT_CTX = 256000
+ROSETTA_DIR = SCRIPT_DIR / "llm-rosetta"
+ROSETTA_SRC_DIR = ROSETTA_DIR / "src"
+ROSETTA_CONFIG_PATH = SCRIPT_DIR / "rosetta_config.jsonc"
+ROSETTA_GATEWAY_PORT = 8920
 
 _log_file_lock = threading.Lock()
 _log_file_path: Path | None = None
@@ -123,6 +121,36 @@ PRESETS_FILE = SCRIPT_DIR / "llamaze_presets.json"
 PRESETS_DOC_VERSION = 1
 GUI_API_DEFAULT_PORT = 8910
 GUI_API_PORT_RANGE = 10
+
+
+def _generate_rosetta_config(model_name: str, llama_port: str | int,
+                             gateway_port: int = ROSETTA_GATEWAY_PORT) -> dict[str, Any]:
+    """Build a Rosetta gateway config dict pointing at the local llama-server."""
+    return {
+        "providers": {
+            "openai_chat": {
+                "api_key": "sk-no-key-needed",
+                "base_url": f"http://127.0.0.1:{llama_port}/v1",
+            },
+        },
+        "models": {
+            model_name: "openai_chat",
+        },
+        "server": {
+            "host": "127.0.0.1",
+            "port": gateway_port,
+            "open_on_no_keys": True,
+        },
+    }
+
+
+def _write_rosetta_config(model_name: str, llama_port: str | int) -> Path:
+    """Write the Rosetta gateway config file and return its path."""
+    config = _generate_rosetta_config(model_name, llama_port)
+    with ROSETTA_CONFIG_PATH.open("w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    return ROSETTA_CONFIG_PATH
 
 
 @functools.cache
@@ -349,6 +377,74 @@ class ServerLogThread(QThread):
 
     def stop(self) -> None:
         self._stop_event.set()
+
+
+class RosettaGatewayThread(QThread):
+    """Run the Rosetta gateway subprocess and emit log lines."""
+
+    line_received = pyqtSignal(str)
+    started_ok = pyqtSignal()
+    finished_with_code = pyqtSignal(int)
+
+    def __init__(self, config_path: Path):
+        super().__init__()
+        self._config_path = config_path
+        self._process: subprocess.Popen | None = None
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        env = os.environ.copy()
+        # Ensure llm_rosetta is importable from the submodule
+        src_dir = str(ROSETTA_SRC_DIR)
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = src_dir + (os.pathsep + existing if existing else "")
+        # Use the same Python interpreter that runs the GUI
+        python = sys.executable
+        cmd = [python, "-m", "llm_rosetta.gateway", "--config", str(self._config_path), "--no-banner"]
+        try:
+            self._process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=0,
+                env=env,
+            )
+        except Exception as exc:
+            self.line_received.emit(f"[Rosetta gateway failed to start: {exc}]")
+            self.finished_with_code.emit(-1)
+            return
+
+        self.line_received.emit(f"Rosetta gateway PID: {self._process.pid}")
+        self.started_ok.emit()
+
+        parser = LogChunkParser()
+        stdout = self._process.stdout
+        if stdout is None:
+            return
+        while not self._stop_event.is_set():
+            chunk = stdout.read(4096)
+            if not chunk:
+                break
+            chunk_bytes = chunk.encode("utf-8", "replace") if isinstance(chunk, str) else chunk
+            for line in parser.feed(chunk_bytes):
+                self.line_received.emit(line)
+        for line in parser.flush():
+            if self._stop_event.is_set():
+                break
+            self.line_received.emit(line)
+        retcode = self._process.poll()
+        if retcode is not None:
+            self.finished_with_code.emit(retcode)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._process and self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -1317,34 +1413,18 @@ class GuiApiHandler(http.server.BaseHTTPRequestHandler):
     def _bridge(self) -> Any:
         return self.server.api_bridge  # type: ignore[attr-defined]
 
-    def _responses_proxy(self) -> Any:
-        """Build a ResponsesProxyHandler pointing at the running llama-server."""
-        bridge = self._bridge()
-        port = getattr(bridge, "_running_port", None)
-        if not port:
-            return None
-        host = "127.0.0.1"
-        log_fn = getattr(bridge, "_log", None)
-        return responses_adapter.ResponsesProxyHandler(host=host, port=int(port), log_fn=log_fn)
-
     def do_GET(self) -> None:
         path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
         bridge = self._bridge()
 
         if path == "/":
-            responses_endpoints = []
-            if getattr(bridge, "_responses_api_enabled", False) and _RESPONSES_ADAPTER_AVAILABLE:
-                responses_endpoints = [
-                    "POST /v1/responses", "GET  /v1/responses (websocket)",
-                    "POST /v1/responses/compact",
-                ]
             self._send_json(200, {
                 "service": "llama-server-gui",
                 "endpoints": [
                     "GET  /status", "GET  /models", "GET  /params",
                     "GET  /log", "POST /start", "POST /stop",
                     "POST /model", "POST /params", "POST /refresh",
-                ] + responses_endpoints,
+                ],
             })
         elif path == "/status":
             self._send_json(200, bridge.api_execute("api_get_status"))
@@ -1354,43 +1434,12 @@ class GuiApiHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, bridge.api_execute("api_get_params"))
         elif path == "/log":
             self._send_json(200, bridge.api_execute("api_get_log"))
-        elif path == "/v1/responses" and _RESPONSES_ADAPTER_AVAILABLE:
-            if not getattr(bridge, "_responses_api_enabled", False):
-                self._send_json(404, {"error": "Responses API is disabled. Enable it via View menu."})
-                return
-            proxy = self._responses_proxy()
-            if proxy is not None:
-                if proxy.handle_websocket_upgrade(self):
-                    return
-            self._send_json(400, {"error": "websocket upgrade required for GET /v1/responses"})
         else:
             self._send_json(404, {"error": f"unknown path: {path}"})
 
     def do_POST(self) -> None:
         path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
         bridge = self._bridge()
-
-        if path == "/v1/responses" and _RESPONSES_ADAPTER_AVAILABLE:
-            if not getattr(bridge, "_responses_api_enabled", False):
-                self._send_json(404, {"error": "Responses API is disabled. Enable it via View menu."})
-                return
-            proxy = self._responses_proxy()
-            if proxy is None:
-                self._send_json(503, {"error": "llama-server is not running"})
-                return
-            proxy.handle_responses(self)
-            return
-
-        if path == "/v1/responses/compact" and _RESPONSES_ADAPTER_AVAILABLE:
-            if not getattr(bridge, "_responses_api_enabled", False):
-                self._send_json(404, {"error": "Responses API is disabled. Enable it via View menu."})
-                return
-            proxy = self._responses_proxy()
-            if proxy is None:
-                self._send_json(503, {"error": "llama-server is not running"})
-                return
-            proxy.handle_compact(self)
-            return
 
         try:
             body = self._read_body()
@@ -1559,7 +1608,7 @@ class MainWindow(QMainWindow):
         self._local_server: QLocalServer | None = None
         self._advanced_widgets: list[QWidget] = []
         self._show_advanced = False
-        self._responses_api_enabled = False
+        self._rosetta_thread: RosettaGatewayThread | None = None
         self._api_server: http.server.HTTPServer | None = None
         self._api_result: Any = None
         self._api_result_event = threading.Event()
@@ -1581,9 +1630,6 @@ class MainWindow(QMainWindow):
         self._show_advanced = settings.value("showAdvanced", False, type=bool)
         self._action_show_advanced.setChecked(self._show_advanced)
         self._apply_advanced_visibility()
-        self._responses_api_enabled = settings.value("responsesApiEnabled", False, type=bool)
-        self._action_enable_responses.setChecked(self._responses_api_enabled)
-        self._apply_responses_api_visibility()
 
     # ───────────────────────────── UI construction ────────────────────
 
@@ -1602,12 +1648,6 @@ class MainWindow(QMainWindow):
         self._action_show_advanced.setChecked(self._show_advanced)
         self._action_show_advanced.triggered.connect(self._toggle_advanced_settings)
         view_menu.addAction(self._action_show_advanced)
-
-        self._action_enable_responses = QAction("Enable &Responses API / Codex", self)
-        self._action_enable_responses.setCheckable(True)
-        self._action_enable_responses.setChecked(False)
-        self._action_enable_responses.triggered.connect(self._toggle_responses_api)
-        view_menu.addAction(self._action_enable_responses)
 
         # ---- Row 1: Server binary ----
         self._srv_row, self.server_edit = _browse_row(
@@ -2030,39 +2070,46 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(clear_log_btn)
         main_layout.addLayout(btn_row)
 
-        # ---- Responses API / Codex connection panel ----
-        self._responses_group = QGroupBox("Responses API / Codex Connection")
-        self._responses_group.setFont(ui_font(True))
-        self._responses_group.setStyleSheet(
+        # ---- Rosetta gateway API connection panel ----
+        self._rosetta_group = QGroupBox("Rosetta Gateway — Responses & Messages API")
+        self._rosetta_group.setFont(ui_font(True))
+        self._rosetta_group.setStyleSheet(
             "QGroupBox { color: #555; }"
         )
-        rlayout = QVBoxLayout(self._responses_group)
+        rlayout = QVBoxLayout(self._rosetta_group)
         rlayout.setContentsMargins(6, 6, 6, 6)
         rlayout.setSpacing(4)
 
-        # Path 1: config.toml
+        # Codex config.toml (uses Responses API via gateway)
         rlayout.addWidget(self._make_copy_row(
             "Codex config.toml:",
             'model = "{model}"\n'
-            'model_provider = "llama-server"\n\n'
-            '[model_providers.llama-server]\n'
-            'name = "llama-server"\n'
-            'base_url = "http://127.0.0.1:{port}/v1"\n'
+            'model_provider = "rosetta"\n\n'
+            '[model_providers.rosetta]\n'
+            'name = "rosetta"\n'
+            'base_url = "http://127.0.0.1:{rosetta_port}/v1"\n'
             'wire_api = "responses"',
             "config_toml",
         ))
 
-        # Path 2: env vars
+        # Environment variables for OpenAI-compatible clients
         rlayout.addWidget(self._make_copy_row(
-            "Environment variables:",
-            'export OPENAI_BASE_URL="http://127.0.0.1:{port}/v1"\n'
+            "OpenAI env vars:",
+            'export OPENAI_BASE_URL="http://127.0.0.1:{rosetta_port}/v1"\n'
             'export OPENAI_API_KEY="any-string"',
             "env_vars",
         ))
 
-        self._responses_group.setMaximumHeight(160)
-        self._responses_group.setVisible(False)
-        main_layout.addWidget(self._responses_group, 0)
+        # Anthropic Messages API endpoint
+        rlayout.addWidget(self._make_copy_row(
+            "Messages API:",
+            'export ANTHROPIC_BASE_URL="http://127.0.0.1:{rosetta_port}"\n'
+            'export ANTHROPIC_API_KEY="any-string"',
+            "env_anthropic",
+        ))
+
+        self._rosetta_group.setMaximumHeight(200)
+        main_layout.addWidget(self._rosetta_group, 0)
 
         # ---- Status bar ----
         status_bar = cast(QStatusBar, self.statusBar())
@@ -2623,7 +2670,7 @@ class MainWindow(QMainWindow):
         self._update_default_mmproj(model_path)
         self._update_default_draft_model(model_path)
         self._update_predict_default(model_path, metadata)
-        self._update_responses_panel()
+        self._update_rosetta_panel()
 
         server, notes = resolve_display_server_for_model(self.server_edit.text(), metadata)
         if server != self.server_edit.text():
@@ -2776,9 +2823,9 @@ class MainWindow(QMainWindow):
 
         container = QWidget()
         container.setLayout(row)
-        if not hasattr(self, "_responses_templates"):
-            self._responses_templates = {}
-        self._responses_templates[key] = (template, text_field)
+        if not hasattr(self, "_rosetta_templates"):
+            self._rosetta_templates = {}
+        self._rosetta_templates[key] = (template, text_field)
         return container
 
     def _copy_to_clipboard(self, text_field: QPlainTextEdit) -> None:
@@ -2787,14 +2834,13 @@ class MainWindow(QMainWindow):
             QApplication.clipboard().setText(text)
             cast(QStatusBar, self.statusBar()).showMessage("Copied to clipboard", 2000)
 
-    def _update_responses_panel(self) -> None:
-        """Refresh the Responses API panel with current port and model."""
-        port = getattr(self, "_api_port", None) or GUI_API_DEFAULT_PORT
+    def _update_rosetta_panel(self) -> None:
+        """Refresh the Rosetta gateway panel with current model."""
         alias = self.alias_edit.text().strip()
         model = alias or self.model_combo.currentText() or "model"
-        if hasattr(self, "_responses_templates"):
-            for template, text_field in self._responses_templates.values():
-                text_field.setPlainText(template.format(port=port, model=model))
+        if hasattr(self, "_rosetta_templates"):
+            for template, text_field in self._rosetta_templates.values():
+                text_field.setPlainText(template.format(rosetta_port=ROSETTA_GATEWAY_PORT, model=model))
 
     # ───────────────────────────── window controls ────────────────────
 
@@ -2808,20 +2854,6 @@ class MainWindow(QMainWindow):
     def _apply_advanced_visibility(self) -> None:
         for widget in self._advanced_widgets:
             widget.setVisible(self._show_advanced)
-
-    def _toggle_responses_api(self, checked: bool) -> None:
-        self._responses_api_enabled = checked
-        self._apply_responses_api_visibility()
-        settings = QSettings("llamacpp", "llama-server-gui")
-        settings.setValue("responsesApiEnabled", checked)
-        if checked:
-            self._log("Responses API / Codex enabled")
-        else:
-            self._log("Responses API / Codex disabled")
-
-    def _apply_responses_api_visibility(self) -> None:
-        if hasattr(self, "_responses_group"):
-            self._responses_group.setVisible(self._responses_api_enabled)
 
     def _toggle_always_on_top(self) -> None:
         """Toggle the window's 'always on top' flag."""
@@ -3189,7 +3221,34 @@ class MainWindow(QMainWindow):
         port = self.port_edit.text() or "8080"
         self._log(f"UI available at http://127.0.0.1:{port}")
         cast(QStatusBar, self.statusBar()).showMessage(f"Running \u2014 PID {self._server_process.pid}")
+
+        # Start Rosetta gateway for Responses + Messages API
+        self._start_rosetta_gateway(port)
         return True, None
+
+    def _start_rosetta_gateway(self, llama_port: str) -> None:
+        """Generate config and launch the Rosetta gateway subprocess."""
+        alias = self.alias_edit.text().strip()
+        model_name = alias or self.model_combo.currentText() or "model"
+        try:
+            config_path = _write_rosetta_config(model_name, llama_port)
+        except Exception as exc:
+            self._log(f"Rosetta gateway: failed to write config: {exc}")
+            return
+        if self._rosetta_thread and self._rosetta_thread.isRunning():
+            self._log("Rosetta gateway: already running, stopping old instance")
+            self._rosetta_thread.stop()
+            self._rosetta_thread.wait(5000)
+        self._rosetta_thread = RosettaGatewayThread(config_path)
+        self._rosetta_thread.line_received.connect(self._log)
+        self._rosetta_thread.finished_with_code.connect(self._on_rosetta_exit)
+        self._rosetta_thread.start()
+        self._log(f"Rosetta gateway: http://127.0.0.1:{ROSETTA_GATEWAY_PORT} "
+                  f"(Responses: /v1/responses, Messages: /v1/messages)")
+
+    def _on_rosetta_exit(self, code: int) -> None:
+        if code != 0:
+            self._log(f"[Rosetta gateway exited with code {code}]")
 
     def _start_server(self):
         success, error = self._start_server_core()
@@ -3199,9 +3258,21 @@ class MainWindow(QMainWindow):
     def _on_server_exit(self, code: int) -> None:
         if not self._stop_event.is_set():
             self._log(f"[Server exited with code {code}]")
+            # Stop Rosetta gateway since upstream is gone
+            if self._rosetta_thread and self._rosetta_thread.isRunning():
+                self._rosetta_thread.stop()
+                self._rosetta_thread.wait(5000)
+                self._rosetta_thread = None
             self._set_idle()
 
     def _stop_server(self):
+        # Stop Rosetta gateway first
+        if self._rosetta_thread and self._rosetta_thread.isRunning():
+            self._log("Stopping Rosetta gateway")
+            self._rosetta_thread.stop()
+            self._rosetta_thread.wait(5000)
+            self._rosetta_thread = None
+
         if self._server_process and self._server_process.poll() is None:
             self._log("Stopping server\u2026")
             self._stop_event.set()
@@ -3271,7 +3342,7 @@ class MainWindow(QMainWindow):
         self._api_server = server
         self._api_port = port
         self._log(f"GUI API: http://127.0.0.1:{port}")
-        self._update_responses_panel()
+        self._update_rosetta_panel()
 
     def _stop_api_server(self) -> None:
         if self._api_server is not None:

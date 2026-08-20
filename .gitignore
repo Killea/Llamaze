@@ -6,3 +6,12 @@ llamaze_mtp.ini
 
 # GUI runtime logs (per-user, regenerated on each run)
 gui_log/
+
+# Rosetta gateway config (auto-generated on server start)
+rosetta_config.jsonc
+
+# Rosetta gateway runtime data (metrics, keystore, persistence)
+data/
+keys.db
+keys.db-shm
+keys.db-wal
