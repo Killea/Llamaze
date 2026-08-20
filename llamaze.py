@@ -458,6 +458,27 @@ def resolve_server_path() -> Path:
     return DEFAULT_SERVER_CANDIDATES[0]
 
 
+def _kill_process_on_port(port: int) -> None:
+    """Kill any process listening on the given TCP port (best-effort)."""
+    import signal
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            result = s.connect_ex(("127.0.0.1", port))
+            if result != 0:
+                return  # port is free
+    except OSError:
+        return
+    # Find and kill the process using fuser
+    try:
+        subprocess.run(
+            ["fuser", "-k", f"{port}/tcp"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+
 def format_server_build_info(server_raw: str) -> str:
     """Return a compact one-line summary of the selected llama-server binary."""
     server = Path(server_raw).expanduser()
@@ -2080,6 +2101,13 @@ class MainWindow(QMainWindow):
         rlayout.setContentsMargins(6, 6, 6, 6)
         rlayout.setSpacing(4)
 
+        # Model name row (prominent, copyable)
+        rlayout.addWidget(self._make_copy_row(
+            "Model name:",
+            "{model}",
+            "model_name",
+        ))
+
         # Codex config.toml (uses Responses API via gateway)
         rlayout.addWidget(self._make_copy_row(
             "Codex config.toml:",
@@ -2108,7 +2136,7 @@ class MainWindow(QMainWindow):
             "env_anthropic",
         ))
 
-        self._rosetta_group.setMaximumHeight(200)
+        self._rosetta_group.setMaximumHeight(250)
         main_layout.addWidget(self._rosetta_group, 0)
 
         # ---- Status bar ----
@@ -3235,16 +3263,21 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._log(f"Rosetta gateway: failed to write config: {exc}")
             return
+        # Stop tracked thread if running
         if self._rosetta_thread and self._rosetta_thread.isRunning():
-            self._log("Rosetta gateway: already running, stopping old instance")
+            self._log("Rosetta gateway: stopping old instance")
             self._rosetta_thread.stop()
             self._rosetta_thread.wait(5000)
+        # Kill any orphaned gateway process on the port (e.g. from a crashed session)
+        _kill_process_on_port(ROSETTA_GATEWAY_PORT)
         self._rosetta_thread = RosettaGatewayThread(config_path)
         self._rosetta_thread.line_received.connect(self._log)
         self._rosetta_thread.finished_with_code.connect(self._on_rosetta_exit)
         self._rosetta_thread.start()
         self._log(f"Rosetta gateway: http://127.0.0.1:{ROSETTA_GATEWAY_PORT} "
+                  f"model='{model_name}' "
                   f"(Responses: /v1/responses, Messages: /v1/messages)")
+        self._update_rosetta_panel()
 
     def _on_rosetta_exit(self, code: int) -> None:
         if code != 0:
