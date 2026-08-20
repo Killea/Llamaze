@@ -3,3 +3,6 @@ __pycache__/
 
 # MTP detection cache (per-user, regenerated on first run)
 llamaze_mtp.ini
+
+# GUI runtime logs (per-user, regenerated on each run)
+gui_log/
