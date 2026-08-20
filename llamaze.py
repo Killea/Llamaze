@@ -1642,6 +1642,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._default_parameter_values = self._capture_parameter_settings()
         self._load_parameter_settings()
+        # Sync loaded alias to the API tab alias field
+        self.api_alias_edit.setText(self.alias_edit.text())
         self._connect_parameter_autosave()
         self._setup_local_server()
         self._refresh_model_list()
@@ -2111,7 +2113,20 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(btn_row)
 
         # ---- API tab content ----
-        # Model name
+        # Model alias (editable, synced to alias_edit for llama-server -a)
+        alias_row = QHBoxLayout()
+        alias_row.setSpacing(4)
+        alias_label = QLabel("Alias:")
+        alias_label.setFont(ui_font(True))
+        alias_label.setMinimumWidth(130)
+        alias_row.addWidget(alias_label, 0)
+        self.api_alias_edit = QLineEdit()
+        self.api_alias_edit.setFont(ui_font(True))
+        self.api_alias_edit.setPlaceholderText("llamaze")
+        alias_row.addWidget(self.api_alias_edit, 1)
+        self._rosetta_layout.addLayout(alias_row)
+
+        # Model name (the .gguf file, for reference)
         self._rosetta_layout.addWidget(self._make_copy_row(
             "Model:",
             "{model}",
@@ -2165,6 +2180,8 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.log_text)
         main_layout.addWidget(log_group, 0)
         self.model_combo.currentIndexChanged.connect(self._on_model_selection_changed)
+        # Sync API tab alias to the advanced alias field and refresh panel
+        self.api_alias_edit.textChanged.connect(self._on_api_alias_changed)
         self._launch_controls = [
             self._srv_row,
             self._dir_row,
@@ -2864,9 +2881,19 @@ class MainWindow(QMainWindow):
             QApplication.clipboard().setText(text)
             cast(QStatusBar, self.statusBar()).showMessage("Copied to clipboard", 2000)
 
+    def _on_api_alias_changed(self) -> None:
+        """Sync API tab alias to advanced alias field and refresh panel."""
+        text = self.api_alias_edit.text().strip()
+        self.alias_edit.setText(text)
+        self._update_rosetta_panel()
+
+    def _effective_alias(self) -> str:
+        """Return the alias to use: API tab value, or 'llamaze' default."""
+        return self.api_alias_edit.text().strip() or "llamaze"
+
     def _update_rosetta_panel(self) -> None:
         """Refresh the API tab with current model and ports."""
-        alias = self.alias_edit.text().strip()
+        alias = self._effective_alias()
         model = alias or self.model_combo.currentText() or "model"
         llama_port = self._running_port or self.port_edit.text() or "8080"
         if hasattr(self, "_rosetta_templates"):
@@ -3068,7 +3095,10 @@ class MainWindow(QMainWindow):
         add_on_off(self.backend_sampling_combo, "--backend-sampling")
         add_on_off(self.ignore_eos_combo, "--ignore-eos")
 
-        add_text("-a", self.alias_edit)
+        # Ensure alias is set: use API tab alias or default "llamaze"
+        effective_alias = self._effective_alias()
+        if effective_alias and flag_supported("-a"):
+            command.extend(["-a", effective_alias])
         add_text("--tags", self.tags_edit)
         add_text("--api-key", self.api_key_edit)
         add_text("--api-key-file", self.api_key_file_edit)
@@ -3198,6 +3228,8 @@ class MainWindow(QMainWindow):
 
     def _start_server_core(self) -> tuple[bool, str | None]:
         """Start the llama-server subprocess. Returns (success, error_message)."""
+        # Ensure alias is synced before building command
+        self.alias_edit.setText(self._effective_alias())
         try:
             command = self._build_command()
         except ValueError as exc:
@@ -3260,8 +3292,7 @@ class MainWindow(QMainWindow):
 
     def _start_rosetta_gateway(self, llama_port: str) -> None:
         """Generate config and launch the Rosetta gateway subprocess."""
-        alias = self.alias_edit.text().strip()
-        model_name = alias or self.model_combo.currentText() or "model"
+        model_name = self._effective_alias()
         try:
             config_path = _write_rosetta_config(model_name, llama_port)
         except Exception as exc:
