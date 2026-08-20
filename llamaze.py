@@ -1678,7 +1678,7 @@ class MainWindow(QMainWindow):
         self._rosetta_layout = QVBoxLayout(rosetta_tab)
         self._rosetta_layout.setContentsMargins(8, 8, 8, 8)
         self._rosetta_layout.setSpacing(6)
-        self._tab_widget.addTab(rosetta_tab, "Rosetta Gateway")
+        self._tab_widget.addTab(rosetta_tab, "API")
 
         # ---- Menu bar ----
         menubar = cast(QMainWindow, self).menuBar()
@@ -2110,51 +2110,33 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(clear_log_btn)
         main_layout.addLayout(btn_row)
 
-        # ---- Rosetta gateway tab content ----
-        # Info label
-        rosetta_info = QLabel(
-            "The Rosetta gateway runs alongside llama-server and translates\n"
-            "OpenAI Responses API and Anthropic Messages API to llama-server's\n"
-            "native Chat Completions endpoint."
-        )
-        rosetta_info.setFont(ui_font(True))
-        rosetta_info.setStyleSheet("color: #555; padding: 4px;")
-        rosetta_info.setWordWrap(True)
-        self._rosetta_layout.addWidget(rosetta_info)
-
-        # Model name row (prominent, copyable)
+        # ---- API tab content ----
+        # Model name
         self._rosetta_layout.addWidget(self._make_copy_row(
-            "Model name:",
+            "Model:",
             "{model}",
             "model_name",
         ))
 
-        # Codex config.toml (uses Responses API via gateway)
+        # Chat Completions API (llama-server native)
         self._rosetta_layout.addWidget(self._make_copy_row(
-            "Codex config.toml:",
-            'model = "{model}"\n'
-            'model_provider = "rosetta"\n\n'
-            '[model_providers.rosetta]\n'
-            'name = "rosetta"\n'
-            'base_url = "http://127.0.0.1:{rosetta_port}/v1"\n'
-            'wire_api = "responses"',
-            "config_toml",
+            "Chat API:",
+            "http://127.0.0.1:{llama_port}/v1/chat/completions",
+            "chat_api",
         ))
 
-        # Environment variables for OpenAI-compatible clients
+        # Responses API (via gateway)
         self._rosetta_layout.addWidget(self._make_copy_row(
-            "OpenAI env vars:",
-            'export OPENAI_BASE_URL="http://127.0.0.1:{rosetta_port}/v1"\n'
-            'export OPENAI_API_KEY="any-string"',
-            "env_vars",
+            "Responses API:",
+            "http://127.0.0.1:{rosetta_port}/v1/responses",
+            "responses_api",
         ))
 
-        # Anthropic Messages API endpoint
+        # Messages API (via gateway)
         self._rosetta_layout.addWidget(self._make_copy_row(
             "Messages API:",
-            'export ANTHROPIC_BASE_URL="http://127.0.0.1:{rosetta_port}"\n'
-            'export ANTHROPIC_API_KEY="any-string"',
-            "env_anthropic",
+            "http://127.0.0.1:{rosetta_port}/v1/messages",
+            "messages_api",
         ))
 
         self._rosetta_layout.addStretch()
@@ -2883,12 +2865,14 @@ class MainWindow(QMainWindow):
             cast(QStatusBar, self.statusBar()).showMessage("Copied to clipboard", 2000)
 
     def _update_rosetta_panel(self) -> None:
-        """Refresh the Rosetta gateway panel with current model."""
+        """Refresh the API tab with current model and ports."""
         alias = self.alias_edit.text().strip()
         model = alias or self.model_combo.currentText() or "model"
+        llama_port = self._running_port or self.port_edit.text() or "8080"
         if hasattr(self, "_rosetta_templates"):
             for template, text_field in self._rosetta_templates.values():
-                text_field.setPlainText(template.format(rosetta_port=ROSETTA_GATEWAY_PORT, model=model))
+                text_field.setPlainText(template.format(
+                    rosetta_port=ROSETTA_GATEWAY_PORT, llama_port=llama_port, model=model))
 
     # ───────────────────────────── window controls ────────────────────
 
