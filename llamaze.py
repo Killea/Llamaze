@@ -49,6 +49,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QStatusBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -1657,9 +1658,27 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
+        outer_layout = QVBoxLayout(central)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # ---- Tab widget ----
+        self._tab_widget = QTabWidget()
+        outer_layout.addWidget(self._tab_widget)
+
+        # Tab 1: Server
+        server_tab = QWidget()
+        main_layout = QVBoxLayout(server_tab)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(4)
+        self._tab_widget.addTab(server_tab, "Server")
+
+        # Tab 2: Rosetta Gateway
+        rosetta_tab = QWidget()
+        self._rosetta_layout = QVBoxLayout(rosetta_tab)
+        self._rosetta_layout.setContentsMargins(8, 8, 8, 8)
+        self._rosetta_layout.setSpacing(6)
+        self._tab_widget.addTab(rosetta_tab, "Rosetta Gateway")
 
         # ---- Menu bar ----
         menubar = cast(QMainWindow, self).menuBar()
@@ -2091,25 +2110,27 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(clear_log_btn)
         main_layout.addLayout(btn_row)
 
-        # ---- Rosetta gateway API connection panel ----
-        self._rosetta_group = QGroupBox("Rosetta Gateway — Responses & Messages API")
-        self._rosetta_group.setFont(ui_font(True))
-        self._rosetta_group.setStyleSheet(
-            "QGroupBox { color: #555; }"
+        # ---- Rosetta gateway tab content ----
+        # Info label
+        rosetta_info = QLabel(
+            "The Rosetta gateway runs alongside llama-server and translates\n"
+            "OpenAI Responses API and Anthropic Messages API to llama-server's\n"
+            "native Chat Completions endpoint."
         )
-        rlayout = QVBoxLayout(self._rosetta_group)
-        rlayout.setContentsMargins(6, 6, 6, 6)
-        rlayout.setSpacing(4)
+        rosetta_info.setFont(ui_font(True))
+        rosetta_info.setStyleSheet("color: #555; padding: 4px;")
+        rosetta_info.setWordWrap(True)
+        self._rosetta_layout.addWidget(rosetta_info)
 
         # Model name row (prominent, copyable)
-        rlayout.addWidget(self._make_copy_row(
+        self._rosetta_layout.addWidget(self._make_copy_row(
             "Model name:",
             "{model}",
             "model_name",
         ))
 
         # Codex config.toml (uses Responses API via gateway)
-        rlayout.addWidget(self._make_copy_row(
+        self._rosetta_layout.addWidget(self._make_copy_row(
             "Codex config.toml:",
             'model = "{model}"\n'
             'model_provider = "rosetta"\n\n'
@@ -2121,7 +2142,7 @@ class MainWindow(QMainWindow):
         ))
 
         # Environment variables for OpenAI-compatible clients
-        rlayout.addWidget(self._make_copy_row(
+        self._rosetta_layout.addWidget(self._make_copy_row(
             "OpenAI env vars:",
             'export OPENAI_BASE_URL="http://127.0.0.1:{rosetta_port}/v1"\n'
             'export OPENAI_API_KEY="any-string"',
@@ -2129,15 +2150,14 @@ class MainWindow(QMainWindow):
         ))
 
         # Anthropic Messages API endpoint
-        rlayout.addWidget(self._make_copy_row(
+        self._rosetta_layout.addWidget(self._make_copy_row(
             "Messages API:",
             'export ANTHROPIC_BASE_URL="http://127.0.0.1:{rosetta_port}"\n'
             'export ANTHROPIC_API_KEY="any-string"',
             "env_anthropic",
         ))
 
-        self._rosetta_group.setMaximumHeight(250)
-        main_layout.addWidget(self._rosetta_group, 0)
+        self._rosetta_layout.addStretch()
 
         # ---- Status bar ----
         status_bar = cast(QStatusBar, self.statusBar())
