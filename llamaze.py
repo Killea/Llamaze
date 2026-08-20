@@ -56,7 +56,7 @@ from PyQt6.QtCore import QSettings, QTimer, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QCursor, QFont, QFontDatabase, QIcon
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 
-from run_qwen36_27b import (
+from gguf_utils import (
     detect_mtp_cached,
     inspect_gguf_metadata,
     model_context_length,
@@ -70,7 +70,7 @@ except ImportError:
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL_DIR = SCRIPT_DIR.parent / "llama_model"
-DEFAULT_MTP_CACHE = SCRIPT_DIR / "run_qwen36_27b_mtp.ini"
+DEFAULT_MTP_CACHE = SCRIPT_DIR / "llamaze_mtp.ini"
 LOG_DIR = SCRIPT_DIR / "gui_log"
 DEFAULT_CTX = 256000
 
@@ -119,7 +119,7 @@ DEFAULT_SERVER_CANDIDATES = (
     SCRIPT_DIR / "build/bin/llama-server",
 )
 MODEL_SETTINGS_VERSION = 1
-PRESETS_FILE = SCRIPT_DIR / "run_qwen36_27b_presets.json"
+PRESETS_FILE = SCRIPT_DIR / "llamaze_presets.json"
 PRESETS_DOC_VERSION = 1
 GUI_API_DEFAULT_PORT = 8910
 GUI_API_PORT_RANGE = 10

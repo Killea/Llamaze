@@ -13,7 +13,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL_DIR = SCRIPT_DIR.parent / "llama_model"
-DEFAULT_MTP_CACHE = SCRIPT_DIR / "run_qwen36_27b_mtp.ini"
+DEFAULT_MTP_CACHE = SCRIPT_DIR / "llamaze_mtp.ini"
 DEFAULT_CTX = 256000
 DEFAULT_SERVER_CANDIDATES = (
     Path("./build-qwen38-nographs/bin/llama-server"),
